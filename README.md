@@ -75,9 +75,9 @@ ManakSetu/
 ```
 
 ## 8. Team Members
-- **Manish:** Data arrangement
-- **Anuj Biswas:** AI architect
-- **Aryan Anand:** Backend architect
-- **Vishesh Shokeen:** Frontend developer
-- **Deepanshu Solanki:** Frontend developer
-- **Hitansha Pandey:** PPT / Presentation
+- **Shaurya Aswal:** Data arrangement
+- **Arjun Pant:** AI architect
+- **Pankaj Kumar:** Backend architect
+- **Kunal Sharma:** Frontend developer
+- **Shubhajeet:** Frontend developer
+- **Tanishka Dagar:** PPT / Presentation
