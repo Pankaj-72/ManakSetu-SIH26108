@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Ingestion script for Indian Standards data from CSV.
+
+Reads the `indian_standards_cleaned.csv` file.
+1. Generates semantic embeddings for the descriptions and upserts to Qdrant.
+2. Saves the full metadata (including download_link) to PostgreSQL.
+"""
+
+import csv
+import logging
+import argparse
+import sys
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+import time
+import re
+from datetime import date
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from sqlalchemy.orm import Session
+from app.db.session import SessionLocal
+from app.models.standard import Standard
+from app.services.ai_engine import AIEngine
+from app.db.vector_store import VectorStore
+from app.utils.text_processing import chunk_text, clean_text
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def generate_stable_id(standard_number: str) -> int:
+    """Generate stable point ID for Qdrant from standard_number."""
+    hash_obj = hashlib.md5(standard_number.encode())
+    point_id = int(hash_obj.hexdigest()[:16], 16)
+    return point_id % (2**31 - 1)
+
+def load_csv(file_path: str) -> List[Dict[str, str]]:
+    logger.info(f"Loading CSV file: {file_path}")
+    records = []
+    seen_ids = set()
+    with open(file_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            is_code = row.get('is_code', '').strip()
+            if is_code and row.get('description'):
+                if is_code not in seen_ids:
+                    records.append(row)
+                    seen_ids.add(is_code)
+                else:
+                    logger.warning(f"Skipping duplicate is_code in CSV: {is_code}")
+    logger.info(f"Loaded {len(records)} unique records from CSV")
+    return records
+
+def ingest_standards(file_path: str, batch_size: int = 64, recreate_collection: bool = False):
+    logger.info("Initializing AI Engine and Vector Store...")
+    ai_engine = AIEngine()
+    vector_store = VectorStore()
+    
+    logger.info(f"Ensuring Qdrant collection with dimension: {ai_engine.dimension}")
+    vector_store.ensure_collection(ai_engine.dimension, recreate=recreate_collection)
+
+    records = load_csv(file_path)
+    if not records:
+        logger.error("No valid records found to ingest.")
+        return
+
+    # Process in batches
+    db: Session = SessionLocal()
+    try:
+        upserted_qdrant = 0
+        upserted_postgres = 0
+        
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            
+            texts_to_embed = []
+            qdrant_points = []
+            postgres_objects = []
+
+            # Prepare data
+            for record in batch:
+                is_code = record['is_code'].strip()
+                description = clean_text(record['description'].strip())
+                download_link = record.get('download_link', '').strip()
+                
+                # Extract publication year using regex
+                latest_version = None
+                publication_date = None
+                year_match = re.search(r':\s*(\d{4})', is_code)
+                if year_match:
+                    year_str = year_match.group(1)
+                    latest_version = year_str
+                    try:
+                        publication_date = date(int(year_str), 1, 1)
+                    except ValueError:
+                        pass
+                
+                chunks = chunk_text(description, chunk_size=512, overlap=50, min_chunk_size=20) or [description]
+                for chunk_index, chunk in enumerate(chunks):
+                    texts_to_embed.append(chunk)
+                    qdrant_points.append({
+                        "id": generate_stable_id(f"{is_code}:{chunk_index}"),
+                        "payload": {
+                            "standard_id": is_code,
+                            "standard_number": is_code,
+                            "title": description,
+                            "description": description,
+                            "text": chunk,
+                            "chunk_id": f"{is_code}:{chunk_index}",
+                            "source_document": Path(file_path).name,
+                        }
+                    })
+
+                # Postgres Object Prep
+                postgres_objects.append(Standard(
+                    id=is_code,
+                    standard_number=is_code,
+                    title=description,
+                    description=description,
+                    source_text=description,
+                    download_link=download_link,
+                    latest_version=latest_version,
+                    publication_date=publication_date
+                ))
+
+            # 1. Embed and Upsert to Qdrant
+            logger.info(f"Embedding batch of {len(texts_to_embed)} records...")
+            embeddings = ai_engine.embed_batch(texts_to_embed)
+            for point, emb in zip(qdrant_points, embeddings):
+                point["vector"] = emb
+                
+            vector_store.upsert(qdrant_points)
+            upserted_qdrant += len(qdrant_points)
+
+            # 2. Upsert to Postgres
+            for std in postgres_objects:
+                existing = db.query(Standard).filter(Standard.id == std.id).first()
+                if not existing:
+                    db.add(std)
+                else:
+                    existing.title = std.title
+                    existing.description = std.description
+                    existing.source_text = std.source_text
+                    existing.download_link = std.download_link
+                    existing.latest_version = std.latest_version
+                    existing.publication_date = std.publication_date
+            
+            db.commit()
+            upserted_postgres += len(postgres_objects)
+
+        logger.info("=" * 40)
+        logger.info("INGESTION COMPLETE")
+        logger.info(f"Qdrant Points Upserted: {upserted_qdrant}")
+        logger.info(f"Postgres Rows Upserted: {upserted_postgres}")
+        logger.info("=" * 40)
+
+    except Exception as e:
+        logger.error(f"Ingestion failed: {e}")
+        db.rollback()
+        sys.exit(1)
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Ingest CSV data to Postgres & Qdrant")
+    parser.add_argument("--input", required=True, help="Path to CSV file")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--recreate-collection",
+        action="store_true",
+        help="Explicitly delete and rebuild the configured Qdrant collection; never enabled implicitly.",
+    )
+    args = parser.parse_args()
+    
+    if not Path(args.input).exists():
+        logger.error(f"File not found: {args.input}")
+        sys.exit(1)
+
+    ingest_standards(args.input, args.batch_size, args.recreate_collection)
