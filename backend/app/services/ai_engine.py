@@ -338,10 +338,16 @@ class AIEngine:
             f"{message.get('role', 'user')}: {message.get('content', '')}" for message in history[-8:]
         )
         return self.generate(
-            "You are an expert on Indian Standards and civil engineering. "
+            "You are an assistant that ONLY answers questions about this specific Indian Standard "
+            "and closely related civil engineering / construction topics. "
             "Use the provided context to answer the user's question if possible. "
-            "If the provided context is insufficient, you are allowed to use your pre-trained knowledge to provide a helpful, accurate answer. "
-            "When using your general knowledge, be helpful but advise the user to consult the official standard document for exact clauses.",
+            "If the context is insufficient but the question is still genuinely about this standard "
+            "or civil engineering, you may use your general knowledge, and advise the user to consult "
+            "the official standard document for exact clauses. "
+            "If the question is unrelated to this standard or civil engineering "
+            "(general knowledge, coding, personal questions, jokes, or any other unrelated topic), "
+            "politely decline and say: 'I can only help with questions about this Indian Standard.' "
+            "Do not answer unrelated questions even if you know the answer.",
             f"RETRIEVED STANDARD CONTENT:\n{context_text}\n\nCHAT HISTORY:\n{history_text}\n\nQUESTION:\n{question}",
         )
     def analyze_compliance(self, tender_text: str, matched_standards: list[dict]) -> dict:
