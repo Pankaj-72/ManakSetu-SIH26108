@@ -158,6 +158,7 @@ class VectorStore:
                             f"Vector size mismatch. Expected {vector_size}, "
                             f"got {existing_size}. Drop collection to recreate."
                         )
+                    self._ensure_standard_id_index()
                     return
 
             # Create collection
@@ -172,10 +173,23 @@ class VectorStore:
             )
 
             logger.info(f"Collection created successfully")
+            self._ensure_standard_id_index()
 
         except Exception as e:
             logger.error(f"Failed to ensure collection: {e}")
             raise RuntimeError(f"Collection setup failed: {e}")
+
+    def _ensure_standard_id_index(self) -> None:
+        """Create payload index on 'standard_id' so filtered searches work."""
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="standard_id",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+            logger.info("Ensured payload index on 'standard_id'")
+        except Exception as e:
+            logger.warning(f"Could not ensure 'standard_id' index: {e}")
 
     def upsert(
         self,
